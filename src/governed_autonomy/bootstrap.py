@@ -10,6 +10,7 @@ from .replay import ReplayLog
 from .service import GovernedService
 from .storage import PostgresReplayLog, PostgresTrustStore
 from .signing import Signer
+from .identity import OIDCValidator, UrlJWKSProvider
 from .trust import TrustStore
 
 
@@ -108,6 +109,33 @@ def build_runtime_service(
         actions={"write_file": lambda request: request["content"]},
     )
     return service, issuer, replay_log
+
+
+def build_runtime_service_with_oidc(
+    *,
+    signer: Signer | None = None,
+) -> tuple[GovernedService, Signer, ReplayLog, OIDCValidator | None]:
+    """Build the runtime composition and, when OIDC environment variables are
+    present, construct an OIDCValidator and return it as the fourth tuple
+    element. This helper preserves the original API of build_runtime_service
+    while enabling deployments to opt-in to environment-configured OIDC.
+    """
+    service, issuer, replay_log = build_runtime_service(signer=signer)
+    oidc_issuer = os.environ.get("OIDC_ISSUER")
+    oidc_audience = os.environ.get("OIDC_AUDIENCE")
+    oidc_jwks_url = os.environ.get("OIDC_JWKS_URL")
+    if any((oidc_issuer, oidc_audience, oidc_jwks_url)) and not all(
+        (oidc_issuer, oidc_audience, oidc_jwks_url)
+    ):
+        raise RuntimeError("OIDC_ISSUER, OIDC_AUDIENCE, and OIDC_JWKS_URL must be configured together")
+    oidc_validator = None
+    if oidc_issuer and oidc_audience and oidc_jwks_url:
+        oidc_validator = OIDCValidator(
+            issuer=oidc_issuer,
+            audience=oidc_audience,
+            jwks_provider=UrlJWKSProvider(oidc_jwks_url),
+        )
+    return service, issuer, replay_log, oidc_validator
 
 
 def build_platform_demo(
