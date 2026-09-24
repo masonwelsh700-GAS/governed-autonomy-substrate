@@ -1,0 +1,34 @@
+openapi: 3.0.3
+info:
+  title: Governed Autonomy Runtime Administration API
+  version: 1.0.0
+security:
+  - bearerAuth: []
+paths:
+  /admin/keys:
+    get:
+      summary: Key trust snapshot
+      responses: {'200': {description: Active, trusted, and revoked key IDs}}
+  /admin/keys/active:
+    get:
+      summary: Active issuer key
+      responses: {'200': {description: Active key ID}}
+  /admin/keys/revoked:
+    get:
+      summary: Revoked issuer keys
+      responses: {'200': {description: Revoked key IDs}}
+  /admin/policies/proposals:
+    get:
+      summary: Policy proposal and quorum status
+      responses: {'200': {description: Policy status and proposals}}
+  /status/keys:
+    get:
+      summary: Operator-visible key status
+      responses: {'200': {description: Key status}}
+  /status/policies:
+    get:
+      summary: Operator-visible policy status
+      responses: {'200': {description: Policy status}}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer}
