@@ -25,11 +25,13 @@ class GovernedService:
         actions: dict[str, Callable[[dict[str, Any]], Any]],
         mesh_source_registry: GovernanceSourceRegistry | None = None,
         policy_manager: PolicyChangeManager | None = None,
+        runtime_status_provider: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.issuer = issuer
         self.boundary = boundary
         self.mesh_source_registry = mesh_source_registry
         self.policy_manager = policy_manager
+        self.runtime_status_provider = runtime_status_provider
         self.policies = (
             policies
             if isinstance(policies, PolicyRegistry)
@@ -52,11 +54,8 @@ class GovernedService:
         if self.mesh_source_registry is not None and self.issuer.mesh_source_registry is None:
             self.issuer.mesh_source_registry = self.mesh_source_registry
         return self.issuer.authorize(
-            request,
-            policy,
-            ttl_seconds=ttl_seconds,
-            approvals=approvals,
-            mesh_inputs=mesh_inputs,
+            request, policy, ttl_seconds=ttl_seconds,
+            approvals=approvals, mesh_inputs=mesh_inputs,
         )
 
     def execute(self, artifact: GovernanceAuthorizationArtifact) -> Any:
@@ -67,16 +66,13 @@ class GovernedService:
         return self.boundary.execute(artifact, action)
 
     def execute_dict(self, value: dict[str, Any]) -> Any:
-        """Execute a serialized GAA after strict parsing."""
         return self.execute(GovernanceAuthorizationArtifact.from_dict(value))
 
     def execute_json(self, value: str) -> Any:
-        """Execute a canonical JSON GAA after strict parsing."""
         return self.execute(GovernanceAuthorizationArtifact.from_json(value))
 
     def runtime_status(self) -> dict[str, Any]:
-        """Return a compact runtime snapshot for admin and status endpoints."""
-        state = {
+        state: dict[str, Any] = {
             "actions": sorted(self.actions),
             "policy_ids": sorted(self.policies.versions()),
             "policy_digests": self.policies.digests(),
@@ -90,8 +86,29 @@ class GovernedService:
         }
         if self.policy_manager is not None:
             state["policy_manager"] = self.policy_manager.status()
+        if self.runtime_status_provider is not None:
+            state["runtime"] = self.runtime_status_provider()
         return state
 
+    def admin_status(self) -> dict[str, Any]:
+        """Return only operator-facing trust, policy, and readiness state."""
+        status = self.runtime_status()
+        trust = self.boundary.trust_store.to_dict() if self.boundary.trust_store else {}
+        status["keys"] = {
+            "active_key_id": self.issuer.issuer.key_id,
+            "trusted_key_ids": sorted(trust.get("keys", {})),
+            "revoked_key_ids": sorted(trust.get("revoked", [])),
+        }
+        status["policies"] = {
+            "versions": self.policies.versions(),
+            "digests": self.policies.digests(),
+            "quorum": self.policy_manager.required_approvals if self.policy_manager else None,
+            "proposals": (
+                [proposal.to_dict() for proposal in self.policy_manager.proposals()]
+                if self.policy_manager else []
+            ),
+        }
+        return status
+
     def audit_report(self) -> dict[str, Any]:
-        """Return a deterministic summary of service policy, actions, health, and replay state."""
         return self.runtime_status()
