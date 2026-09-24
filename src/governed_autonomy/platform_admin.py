@@ -17,48 +17,30 @@ class PolicyApproval:
     signature: str
 
     def unsigned_payload(self) -> bytes:
-        return canonical_json(
-            {
-                "proposal_id": self.proposal_id,
-                "policy_id": self.policy_id,
-                "policy_digest": self.policy_digest,
-                "approver_key_id": self.approver_key_id,
-            }
-        )
+        return canonical_json({
+            "proposal_id": self.proposal_id,
+            "policy_id": self.policy_id,
+            "policy_digest": self.policy_digest,
+            "approver_key_id": self.approver_key_id,
+        })
 
     @classmethod
-    def issue(
-        cls,
-        *,
-        proposal_id: str,
-        policy_id: str,
-        policy_digest: str,
-        approver: KeyPair,
-    ) -> PolicyApproval:
-        return cls(
-            proposal_id=proposal_id,
-            policy_id=policy_id,
-            policy_digest=policy_digest,
-            approver_key_id=approver.key_id,
-            signature=approver.sign(
-                canonical_json(
-                    {
-                        "proposal_id": proposal_id,
-                        "policy_id": policy_id,
-                        "policy_digest": policy_digest,
-                        "approver_key_id": approver.key_id,
-                    }
-                )
-            ),
-        )
+    def issue(cls, *, proposal_id: str, policy_id: str, policy_digest: str,
+              approver: KeyPair) -> "PolicyApproval":
+        return cls(proposal_id, policy_id, policy_digest, approver.key_id,
+                   approver.sign(canonical_json({
+                       "proposal_id": proposal_id, "policy_id": policy_id,
+                       "policy_digest": policy_digest, "approver_key_id": approver.key_id,
+                   })))
 
     def verify(self, trust_store: TrustStore) -> bool:
         key = trust_store.resolve(self.approver_key_id)
-        return key is not None and verify_signature(
-            key,
-            self.unsigned_payload(),
-            self.signature,
-        )
+        return key is not None and verify_signature(key, self.unsigned_payload(), self.signature)
+
+    def to_dict(self) -> dict[str, str]:
+        return {"proposal_id": self.proposal_id, "policy_id": self.policy_id,
+                "policy_digest": self.policy_digest, "approver_key_id": self.approver_key_id,
+                "signature": self.signature}
 
 
 @dataclass(frozen=True)
@@ -74,74 +56,50 @@ class PolicyChangeProposal:
     approvals: tuple[PolicyApproval, ...] = ()
 
     def unsigned_payload(self) -> bytes:
-        return canonical_json(
-            {
-                "proposal_id": self.proposal_id,
-                "policy_id": self.policy_id,
-                "current_policy_digest": self.current_policy_digest,
-                "proposed_policy": self.proposed_policy.to_dict(),
-                "proposed_by_key_id": self.proposed_by_key_id,
-                "rationale": self.rationale,
-                "status": self.status,
-            }
-        )
+        return canonical_json({
+            "proposal_id": self.proposal_id, "policy_id": self.policy_id,
+            "current_policy_digest": self.current_policy_digest,
+            "proposed_policy": self.proposed_policy.to_dict(),
+            "proposed_by_key_id": self.proposed_by_key_id,
+            "rationale": self.rationale, "status": self.status,
+        })
 
     @classmethod
-    def propose(
-        cls,
-        *,
-        proposal_id: str,
-        policy: Policy,
-        proposer: KeyPair,
-        rationale: str,
-        current_policy_digest: str,
-    ) -> PolicyChangeProposal:
-        payload = cls(
-            proposal_id=proposal_id,
-            policy_id=policy.policy_id,
-            current_policy_digest=current_policy_digest,
-            proposed_policy=policy,
-            proposed_by_key_id=proposer.key_id,
-            rationale=rationale,
-            status="pending",
-            signature="",
-        )
-        return cls(
-            proposal_id=payload.proposal_id,
-            policy_id=payload.policy_id,
-            current_policy_digest=payload.current_policy_digest,
-            proposed_policy=payload.proposed_policy,
-            proposed_by_key_id=payload.proposed_by_key_id,
-            rationale=payload.rationale,
-            status=payload.status,
-            signature=proposer.sign(payload.unsigned_payload()),
-            approvals=payload.approvals,
-        )
+    def propose(cls, *, proposal_id: str, policy: Policy, proposer: KeyPair,
+                rationale: str, current_policy_digest: str) -> "PolicyChangeProposal":
+        payload = cls(proposal_id, policy.policy_id, current_policy_digest, policy,
+                      proposer.key_id, rationale)
+        return replace(payload, signature=proposer.sign(payload.unsigned_payload()))
 
     def verify(self, trust_store: TrustStore) -> bool:
         key = trust_store.resolve(self.proposed_by_key_id)
-        return key is not None and verify_signature(
-            key,
-            self.unsigned_payload(),
-            self.signature,
-        )
+        return key is not None and verify_signature(key, self.unsigned_payload(), self.signature)
 
     def approval_count(self) -> int:
         return len({approval.approver_key_id for approval in self.approvals})
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "proposal_id": self.proposal_id,
+            "policy_id": self.policy_id,
+            "current_policy_digest": self.current_policy_digest,
+            "proposed_policy": self.proposed_policy.to_dict(),
+            "proposed_by_key_id": self.proposed_by_key_id,
+            "rationale": self.rationale,
+            "status": self.status,
+            "signature": self.signature,
+            "approval_count": self.approval_count(),
+            "required_approvals": None,
+            "approvals": [approval.to_dict() for approval in self.approvals],
+        }
 
 
 class PolicyChangeManager:
     """Review and activate policy changes with explicit quorum approval."""
 
-    def __init__(
-        self,
-        *,
-        registry: PolicyRegistry,
-        trust_store: TrustStore,
-        required_approvals: int = 2,
-        enforce_separation_of_duties: bool = True,
-        audit_hook=None,
-    ) -> None:
+    def __init__(self, *, registry: PolicyRegistry, trust_store: TrustStore,
+                 required_approvals: int = 2, enforce_separation_of_duties: bool = True,
+                 audit_hook=None) -> None:
         if required_approvals <= 0:
             raise ValueError("required_approvals must be positive")
         self.registry = registry
@@ -151,42 +109,25 @@ class PolicyChangeManager:
         self.audit_hook = audit_hook
         self._proposals: dict[str, PolicyChangeProposal] = {}
 
-    def propose(
-        self,
-        *,
-        new_policy: Policy,
-        proposer: KeyPair,
-        rationale: str = "",
-        proposal_id: str | None = None,
-    ) -> PolicyChangeProposal:
-        key = self.trust_store.resolve(proposer.key_id)
-        if key is None:
+    def propose(self, *, new_policy: Policy, proposer: KeyPair, rationale: str = "",
+                proposal_id: str | None = None) -> PolicyChangeProposal:
+        if self.trust_store.resolve(proposer.key_id) is None:
             raise ValueError("proposer key is not trusted")
         existing = self.registry.get(new_policy.policy_id)
         current_digest = existing.digest() if existing is not None else ""
-        proposal_id = (
-            proposal_id or f"policy-proposal:{new_policy.policy_id}:{current_digest or 'new'}"
-        )
         proposal = PolicyChangeProposal.propose(
-            proposal_id=proposal_id,
-            policy=new_policy,
-            proposer=proposer,
-            rationale=rationale,
+            proposal_id=proposal_id or f"policy-proposal:{new_policy.policy_id}:{current_digest or 'new'}",
+            policy=new_policy, proposer=proposer, rationale=rationale,
             current_policy_digest=current_digest,
         )
         if not proposal.verify(self.trust_store):
             raise ValueError("proposal signature is invalid")
         self._proposals[proposal.proposal_id] = proposal
-        if self.audit_hook is not None:
+        if self.audit_hook:
             self.audit_hook("policy.proposed", proposal.proposal_id)
         return proposal
 
-    def approve(
-        self,
-        proposal_id: str,
-        *,
-        approver: KeyPair,
-    ) -> PolicyChangeProposal:
+    def approve(self, proposal_id: str, *, approver: KeyPair) -> PolicyChangeProposal:
         proposal = self._proposals.get(proposal_id)
         if proposal is None:
             raise KeyError(f"unknown policy proposal: {proposal_id}")
@@ -194,26 +135,18 @@ class PolicyChangeManager:
             raise ValueError("proposal is no longer pending")
         if self.enforce_separation_of_duties and approver.key_id == proposal.proposed_by_key_id:
             raise ValueError("proposer cannot approve the same policy change")
-        key = self.trust_store.resolve(approver.key_id)
-        if key is None:
+        if self.trust_store.resolve(approver.key_id) is None:
             raise ValueError("approver key is not trusted")
-        approval = PolicyApproval.issue(
-            proposal_id=proposal.proposal_id,
-            policy_id=proposal.policy_id,
-            policy_digest=proposal.proposed_policy.digest(),
-            approver=approver,
-        )
-        if not approval.verify(self.trust_store):
-            raise ValueError("approval signature is invalid")
-        approvals = tuple(
-            sorted(
-                [*proposal.approvals, approval],
-                key=lambda item: item.approver_key_id,
-            )
-        )
-        updated = replace(proposal, approvals=approvals)
+        approval = PolicyApproval.issue(proposal_id=proposal.proposal_id,
+                                        policy_id=proposal.policy_id,
+                                        policy_digest=proposal.proposed_policy.digest(),
+                                        approver=approver)
+        if any(item.approver_key_id == approval.approver_key_id for item in proposal.approvals):
+            raise ValueError("approver has already voted")
+        updated = replace(proposal, approvals=tuple(sorted(
+            [*proposal.approvals, approval], key=lambda item: item.approver_key_id)))
         self._proposals[proposal_id] = updated
-        if self.audit_hook is not None:
+        if self.audit_hook:
             self.audit_hook("policy.approved", proposal_id)
         return updated
 
@@ -227,10 +160,12 @@ class PolicyChangeManager:
             raise ValueError("proposal signature is invalid")
         if proposal.approval_count() < self.required_approvals:
             raise ValueError("approval quorum not met")
+        current = self.registry.get(proposal.policy_id)
+        if current is not None and current.digest() != proposal.current_policy_digest:
+            raise ValueError("policy changed since proposal was created")
         self.registry.register(proposal.proposed_policy)
-        updated = replace(proposal, status="activated")
-        self._proposals[proposal_id] = updated
-        if self.audit_hook is not None:
+        self._proposals[proposal_id] = replace(proposal, status="activated")
+        if self.audit_hook:
             self.audit_hook("policy.activated", proposal_id)
         return proposal.proposed_policy
 
@@ -239,3 +174,9 @@ class PolicyChangeManager:
 
     def proposals(self) -> tuple[PolicyChangeProposal, ...]:
         return tuple(self._proposals[key] for key in sorted(self._proposals))
+
+    def status(self) -> dict[str, object]:
+        pending = [proposal for proposal in self._proposals.values() if proposal.status == "pending"]
+        return {"required_approvals": self.required_approvals,
+                "pending": len(pending),
+                "proposals": [proposal.to_dict() for proposal in self.proposals()]}
