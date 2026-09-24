@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -16,30 +14,48 @@ from .policy import Policy, PolicyRegistry
 class GovernedService:
     """Application facade that binds authorized action names to safe handlers."""
 
-    def __init__(self, *, issuer: AuthorizationIssuer, boundary: ExecutionBoundary,
-                 policies: PolicyRegistry | dict[str, Policy],
-                 actions: dict[str, Callable[[dict[str, Any]], Any]],
-                 mesh_source_registry: GovernanceSourceRegistry | None = None,
-                 policy_manager: PolicyChangeManager | None = None,
-                 runtime_status_provider: Callable[[], dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        issuer: AuthorizationIssuer,
+        boundary: ExecutionBoundary,
+        policies: PolicyRegistry | dict[str, Policy],
+        actions: dict[str, Callable[[dict[str, Any]], Any]],
+        mesh_source_registry: GovernanceSourceRegistry | None = None,
+        policy_manager: PolicyChangeManager | None = None,
+        runtime_status_provider: Callable[[], dict[str, Any]] | None = None,
+    ) -> None:
         self.issuer = issuer
         self.boundary = boundary
         self.mesh_source_registry = mesh_source_registry
         self.policy_manager = policy_manager
         self.runtime_status_provider = runtime_status_provider
-        self.policies = policies if isinstance(policies, PolicyRegistry) else PolicyRegistry(tuple(policies.values()))
+        self.policies = (
+            policies if isinstance(policies, PolicyRegistry) else PolicyRegistry(tuple(policies.values()))
+        )
         self.actions = dict(actions)
 
-    def authorize(self, request: dict[str, Any], policy_id: str, *, ttl_seconds: int = 300,
-                  approvals: Sequence[SignedApproval | dict[str, Any]] | None = None,
-                  mesh_inputs: Sequence[GovernanceInput] | None = None) -> GovernanceAuthorizationArtifact:
+    def authorize(
+        self,
+        request: dict[str, Any],
+        policy_id: str,
+        *,
+        ttl_seconds: int = 300,
+        approvals: Sequence[SignedApproval | dict[str, Any]] | None = None,
+        mesh_inputs: Sequence[GovernanceInput] | None = None,
+    ) -> GovernanceAuthorizationArtifact:
         policy = self.policies.get(policy_id)
         if policy is None:
             raise AuthorizationError(f"unknown policy: {policy_id}")
         if self.mesh_source_registry is not None and self.issuer.mesh_source_registry is None:
             self.issuer.mesh_source_registry = self.mesh_source_registry
-        return self.issuer.authorize(request, policy, ttl_seconds=ttl_seconds,
-                                     approvals=approvals, mesh_inputs=mesh_inputs)
+        return self.issuer.authorize(
+            request,
+            policy,
+            ttl_seconds=ttl_seconds,
+            approvals=approvals,
+            mesh_inputs=mesh_inputs,
+        )
 
     def execute(self, artifact: GovernanceAuthorizationArtifact) -> Any:
         action_name = artifact.action_request.get("action")
@@ -55,15 +71,18 @@ class GovernedService:
         return self.execute(GovernanceAuthorizationArtifact.from_json(value))
 
     def runtime_status(self) -> dict[str, Any]:
+        """Return deterministic runtime state for health and operator surfaces."""
         status: dict[str, Any] = {
             "actions": sorted(self.actions),
             "policy_ids": sorted(self.policies.versions()),
             "policy_digests": self.policies.digests(),
             "audit_summary": self.boundary.replay_log.audit_summary(),
-            "health": health_report(replay_log=self.boundary.replay_log,
-                                     trust_store=self.boundary.trust_store,
-                                     policy_registry=self.policies,
-                                     mesh_source_registry=self.mesh_source_registry),
+            "health": health_report(
+                replay_log=self.boundary.replay_log,
+                trust_store=self.boundary.trust_store,
+                policy_registry=self.policies,
+                mesh_source_registry=self.mesh_source_registry,
+            ),
         }
         if self.policy_manager is not None:
             status["policy_manager"] = self.policy_manager.status()
@@ -72,6 +91,7 @@ class GovernedService:
         return status
 
     def admin_status(self) -> dict[str, Any]:
+        """Return operator-facing trust, policy, replay, and readiness state."""
         status = self.runtime_status()
         trust = self.boundary.trust_store.to_dict() if self.boundary.trust_store else {}
         status["keys"] = {
@@ -83,8 +103,10 @@ class GovernedService:
             "versions": self.policies.versions(),
             "digests": self.policies.digests(),
             "quorum": self.policy_manager.required_approvals if self.policy_manager else None,
-            "proposals": ([p.to_dict() for p in self.policy_manager.proposals()]
-                          if self.policy_manager else []),
+            "proposals": (
+                [proposal.to_dict() for proposal in self.policy_manager.proposals()]
+                if self.policy_manager else []
+            ),
         }
         return status
 
