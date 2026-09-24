@@ -38,6 +38,7 @@ class RuntimeConfig:
     tenant_id: str | None = None
     service_name: str = "governed-autonomy"
     environment: str = "prod"
+    key_rotation_grace_seconds: int = 0
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "RuntimeConfig":
@@ -64,9 +65,20 @@ class RuntimeConfig:
         if quorum <= 0:
             raise RuntimeError("GAS_POLICY_APPROVAL_QUORUM must be positive")
 
-        oidc_values = tuple(env.get(name) for name in ("OIDC_ISSUER", "OIDC_AUDIENCE", "OIDC_JWKS_URL"))
+        try:
+            grace = int(env.get("GAS_KEY_ROTATION_GRACE_SECONDS", "0"))
+        except ValueError as exc:
+            raise RuntimeError("GAS_KEY_ROTATION_GRACE_SECONDS must be an integer") from exc
+        if grace < 0:
+            raise RuntimeError("GAS_KEY_ROTATION_GRACE_SECONDS must be non-negative")
+
+        oidc_values = tuple(
+            env.get(name) for name in ("OIDC_ISSUER", "OIDC_AUDIENCE", "OIDC_JWKS_URL")
+        )
         if any(oidc_values) and not all(oidc_values):
-            raise RuntimeError("OIDC_ISSUER, OIDC_AUDIENCE, and OIDC_JWKS_URL must be configured together")
+            raise RuntimeError(
+                "OIDC_ISSUER, OIDC_AUDIENCE, and OIDC_JWKS_URL must be configured together"
+            )
 
         return cls(
             mode=mode,
@@ -80,7 +92,18 @@ class RuntimeConfig:
             tenant_id=env.get("TENANT_ID"),
             service_name=env.get("GAS_SERVICE_NAME", "governed-autonomy"),
             environment=env.get("GAS_ENVIRONMENT", "prod"),
+            key_rotation_grace_seconds=grace,
         )
+
+
+@dataclass(frozen=True)
+class RuntimeKeyStatus:
+    """Current trust-store and rotation status for the active issuer key."""
+
+    active_key_id: str
+    trusted_keys: tuple[str, ...]
+    revoked_keys: tuple[str, ...]
+    key_rotation_grace_seconds: int
 
 
 @dataclass
@@ -93,6 +116,7 @@ class ProductionRuntime:
     replay_log: ReplayLog
     trust_store: TrustStore
     policy_manager: PolicyChangeManager
+    key_rotation_grace_seconds: int = 0
 
     @classmethod
     def create(
@@ -133,8 +157,14 @@ class ProductionRuntime:
             )
 
         policies = PolicyRegistry(
-            (Policy("demo-files-v1", ("write_file",), {"write_file": ("path", "content")},
-                    {"write_file": {"path": "out.txt"}}),)
+            (
+                Policy(
+                    "demo-files-v1",
+                    ("write_file",),
+                    {"write_file": ("path", "content")},
+                    {"write_file": {"path": "out.txt"}},
+                ),
+            )
         )
         manager = PolicyChangeManager(
             registry=policies,
@@ -152,4 +182,49 @@ class ProductionRuntime:
             actions={"write_file": lambda request: request["content"]},
             policy_manager=manager,
         )
-        return cls(config, service, signer, replay_log, trust_store, manager)
+        return cls(
+            config,
+            service,
+            signer,
+            replay_log,
+            trust_store,
+            manager,
+            key_rotation_grace_seconds=config.key_rotation_grace_seconds,
+        )
+
+    def issuer_status(self) -> RuntimeKeyStatus:
+        """Return current trust-store state and active signer details."""
+        state = self.trust_store.to_dict()
+        return RuntimeKeyStatus(
+            active_key_id=self.signer.key_id,
+            trusted_keys=tuple(sorted(state["keys"])),
+            revoked_keys=tuple(sorted(state["revoked"])),
+            key_rotation_grace_seconds=self.key_rotation_grace_seconds,
+        )
+
+    def rotate_signer(
+        self,
+        new_signer: Signer,
+        *,
+        revoke_old: bool = True,
+        grace_seconds: int | None = None,
+    ) -> RuntimeKeyStatus:
+        """Activate a new signer, optionally revoking the old one.
+
+        The service remains fail-closed: a revoked signer cannot authorize future
+        requests and the runtime keeps the last grace-period configuration for
+        operational visibility.
+        """
+        if grace_seconds is None:
+            grace_seconds = self.key_rotation_grace_seconds
+        if self.signer.key_id != new_signer.key_id:
+            if revoke_old:
+                self.trust_store.revoke(self.signer.key_id)
+            self.trust_store.add(
+                new_signer.key_id,
+                Ed25519PublicKey.from_public_bytes(new_signer.public_key_bytes()),
+            )
+        self.signer = new_signer
+        self.service.issuer.issuer = new_signer
+        self.key_rotation_grace_seconds = grace_seconds
+        return self.issuer_status()
